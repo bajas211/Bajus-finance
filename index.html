@@ -1,0 +1,1348 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+  <meta name="apple-mobile-web-app-title" content="Bajus Finance"/>
+  <title>Bajus Family Finances</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; background: #f8fafc; }
+    body { font-family: -apple-system, "SF Pro Display", system-ui, sans-serif; }
+    input, select, button, textarea { font-family: inherit; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const PRESET_CATEGORIES = [
+“Groceries”,“Dining”,“Gas”,“Utilities”,“Rent/Mortgage”,“Insurance”,
+“Medical”,“Entertainment”,“Clothing”,“Travel”,“Education”,“Subscriptions”,
+“Home & Garden”,“Personal Care”,“Gifts”,“Charity”,“Income”,“Transfer”,“Other”
+];
+const ACCOUNT_COLORS = [”#16a34a”,”#2563eb”,”#9333ea”,”#dc2626”,”#d97706”,”#0891b2”,”#be185d”,”#65a30d”];
+const DEFAULT_BUDGETS = { Groceries:600,Dining:200,Gas:150,Utilities:200,Entertainment:100,Clothing:100,Medical:100,Subscriptions:50 };
+const STORAGE_KEY = “checkbook-data-v2”;
+const RECUR_FREQS = [“Weekly”,“Bi-weekly”,“Monthly”,“Yearly”];
+
+// ─── Storage ──────────────────────────────────────────────────────────────────
+const store = {
+async get(key) {
+try { if (typeof window.storage?.get===“function”) { const r=await window.storage.get(key); return r?.value??null; } } catch(e) {}
+try { return localStorage.getItem(key); } catch(e) { return null; }
+},
+async set(key,value) {
+try { if (typeof window.storage?.set===“function”) { await window.storage.set(key,value); return true; } } catch(e) {}
+try { localStorage.setItem(key,value); return true; } catch(e) { return false; }
+}
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const fmt = n => new Intl.NumberFormat(“en-US”,{style:“currency”,currency:“USD”}).format(n);
+const today = () => new Date().toISOString().slice(0,10);
+const uid = () => Math.random().toString(36).slice(2,10);
+const cap = s => s ? s.charAt(0).toUpperCase()+s.slice(1) : s;
+
+function AccountIcon({type, color, size=22}){
+const t = (type||””).toLowerCase();
+const stroke = color;
+const sw = 1.6;
+if(t===“credit”) return (
+<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+<rect x="2" y="5" width="20" height="14" rx="3"/>
+<line x1="2" y1="10" x2="22" y2="10"/>
+<line x1="6" y1="15" x2="10" y2="15"/>
+</svg>
+);
+if(t===“cash”) return (
+<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+<rect x="2" y="6" width="20" height="12" rx="2"/>
+<circle cx="12" cy="12" r="3"/>
+<line x1="6" y1="6" x2="6" y2="18"/>
+<line x1="18" y1="6" x2="18" y2="18"/>
+</svg>
+);
+if(t===“investment”||t===“brokerage”||t===“ira”||t===“roth ira”||t===“traditional ira”) return (
+<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+<polyline points="3 17 8 12 12 15 17 9 21 12"/>
+<line x1="3" y1="20" x2="21" y2="20"/>
+</svg>
+);
+if(t===“savings”) return (
+<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+<path d="M19 9V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v2"/>
+<path d="M3 11v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6a9 9 0 0 0-18 0z"/>
+<line x1="12" y1="12" x2="12" y2="16"/>
+<line x1="10" y1="14" x2="14" y2="14"/>
+</svg>
+);
+// Default: Checking / bank
+return (
+<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+<polyline points="9 22 9 12 15 12 15 22"/>
+</svg>
+);
+}
+
+function getMonthRange(offset=0) {
+const d=new Date(); d.setMonth(d.getMonth()+offset,1);
+const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,“0”);
+const last=new Date(y,d.getMonth()+1,0).getDate();
+return { start:`${y}-${m}-01`, end:`${y}-${m}-${last}`, label:`${d.toLocaleString("default",{month:"short"})} ${y}` };
+}
+
+function nextRecurDate(dateStr, freq) {
+const d = new Date(dateStr+“T12:00:00”);
+if (freq===“Weekly”)    d.setDate(d.getDate()+7);
+if (freq===“Bi-weekly”) d.setDate(d.getDate()+14);
+if (freq===“Monthly”)   d.setMonth(d.getMonth()+1);
+if (freq===“Yearly”)    d.setFullYear(d.getFullYear()+1);
+return d.toISOString().slice(0,10);
+}
+
+function applyRecurring(data) {
+const todayStr=today(), txs=[…data.transactions], recs=(data.recurring||[]).map(r=>({…r}));
+let changed=false;
+recs.forEach(r=>{
+if(!r.active) return;
+let next=r.nextDate;
+while(next<=todayStr){
+txs.push({id:uid(),accountId:r.accountId,date:next,payee:r.payee,category:r.category,amount:r.amount,memo:r.memo||””,cleared:false,createdAt:new Date().toISOString(),createdBy:“Auto (”+r.freq+”)”,recurringId:r.id});
+next=nextRecurDate(next,r.freq); changed=true;
+}
+if(changed) r.nextDate=next;
+});
+return changed?{…data,transactions:txs,recurring:recs}:data;
+}
+
+const emptyState = () => ({
+accounts:[
+{id:“acc1”,name:“Checking”,type:“Checking”,balance:0,color:ACCOUNT_COLORS[0]},
+{id:“acc2”,name:“Savings”,type:“Savings”,balance:0,color:ACCOUNT_COLORS[1]},
+],
+transactions:[],recurring:[],categories:[…PRESET_CATEGORIES],
+budgets:{…DEFAULT_BUDGETS},lastUpdated:null,lastEditor:null,
+});
+
+// ─── App Shell ────────────────────────────────────────────────────────────────
+function App() {
+const [data,setData]           = useState(null);
+const [loading,setLoading]     = useState(true);
+const [screen,setScreen]       = useState(“accounts”); // accounts | register | reports | recurring | settings
+const [activeAccountId,setActiveAccountId] = useState(null);
+const [modal,setModal]         = useState(null);
+const [selectedTx,setSelectedTx]   = useState(null);
+const [selectedRec,setSelectedRec] = useState(null);
+const [userName,setUserName]   = useState(()=>localStorage.getItem(“ck-username”)||””);
+const [namePrompt,setNamePrompt] = useState(!localStorage.getItem(“ck-username”));
+const [toast,setToast]         = useState(null);
+const [reportRange,setReportRange] = useState({start:getMonthRange().start,end:getMonthRange().end});
+const [reportTab,setReportTab] = useState(“category”);
+const [txFilter,setTxFilter]   = useState(””);
+const [backupReminder,setBackupReminder] = useState(()=>{
+const last = localStorage.getItem(“ck-last-backup”);
+if(!last) return false;
+const daysSince = (Date.now()-parseInt(last))/(1000*60*60*24);
+return daysSince >= 7;
+});
+
+const showToast = useCallback((msg,type=“success”)=>{ setToast({msg,type}); setTimeout(()=>setToast(null),2500); },[]);
+
+const saveData = useCallback(async(newData)=>{
+const toSave={…newData,lastUpdated:new Date().toISOString(),lastEditor:userName||“User”};
+setData(toSave);
+const ok=await store.set(STORAGE_KEY,JSON.stringify(toSave));
+if(!ok) showToast(“Save failed”,“error”);
+},[userName,showToast]);
+
+const loadData = useCallback(async()=>{
+try {
+const val=await store.get(STORAGE_KEY);
+if(val){
+let parsed=JSON.parse(val);
+const applied=applyRecurring(parsed);
+if(applied!==parsed){ await store.set(STORAGE_KEY,JSON.stringify({…applied,lastUpdated:new Date().toISOString()})); parsed=applied; }
+setData(parsed);
+} else { setData(emptyState()); }
+} catch { setData(emptyState()); }
+setLoading(false);
+},[]);
+
+useEffect(()=>{ loadData(); },[]);
+useEffect(()=>{ const id=setInterval(()=>loadData(),15000); return()=>clearInterval(id); },[loadData]);
+
+const accountBal = useCallback((accId)=>
+(data?.transactions||[]).filter(t=>t.accountId===accId).reduce((s,t)=>s+t.amount,(data?.accounts||[]).find(a=>a.id===accId)?.balance||0)
+,[data]);
+
+const netWorth = (data?.accounts||[]).reduce((s,a)=>s+accountBal(a.id),0);
+const activeAccount = data?.accounts?.find(a=>a.id===activeAccountId);
+const payeeMap = (data?.transactions||[]).reduce((m,t)=>{ if(t.payee) m[t.payee]=t.category; return m; },{});
+
+// ── Actions ───────────────────────────────────────────────────────────────
+const addTransaction = f => {
+const amount=f.type===“expense”?-Math.abs(parseFloat(f.amount)):Math.abs(parseFloat(f.amount));
+saveData({…data,transactions:[…data.transactions,{id:uid(),accountId:activeAccountId,date:f.date,payee:f.payee,category:f.category,amount,memo:f.memo||””,cleared:false,createdAt:new Date().toISOString(),createdBy:userName||“User”}]});
+showToast(“Transaction added”); setModal(null);
+};
+const editTransaction = f => {
+const amount=f.type===“expense”?-Math.abs(parseFloat(f.amount)):Math.abs(parseFloat(f.amount));
+saveData({…data,transactions:data.transactions.map(t=>t.id===selectedTx.id?{…t,…f,amount,updatedAt:new Date().toISOString()}:t)});
+showToast(“Updated”); setModal(null); setSelectedTx(null);
+};
+const deleteTransaction = id => {
+saveData({…data,transactions:data.transactions.filter(t=>t.id!==id)});
+showToast(“Deleted”,“error”);
+};
+const toggleCleared = id => saveData({…data,transactions:data.transactions.map(t=>t.id===id?{…t,cleared:!t.cleared}:t)});
+
+const addAccount = f => {
+const acc={id:uid(),name:f.name,type:cap(f.type),balance:parseFloat(f.balance)||0,color:ACCOUNT_COLORS[data.accounts.length%ACCOUNT_COLORS.length]};
+saveData({…data,accounts:[…data.accounts,acc]}); showToast(“Account added”); setModal(null);
+};
+const editAccount = f => {
+saveData({…data,accounts:data.accounts.map(a=>a.id===activeAccountId?{…a,name:f.name,type:cap(f.type)}:a)});
+showToast(“Account updated”); setModal(null);
+};
+const deleteAccount = () => {
+saveData({…data,accounts:data.accounts.filter(a=>a.id!==activeAccountId),transactions:data.transactions.filter(t=>t.accountId!==activeAccountId),recurring:(data.recurring||[]).filter(r=>r.accountId!==activeAccountId)});
+showToast(“Account deleted”,“error”); setScreen(“accounts”); setModal(null);
+};
+const addTransfer = f => {
+const amt=Math.abs(parseFloat(f.amount));
+const toName=data.accounts.find(a=>a.id===f.toAccount)?.name, fromName=data.accounts.find(a=>a.id===f.fromAccount)?.name;
+saveData({…data,transactions:[…data.transactions,
+{id:uid(),accountId:f.fromAccount,date:f.date,payee:`Transfer → ${toName}`,category:“Transfer”,amount:-amt,memo:f.memo||””,cleared:false,createdAt:new Date().toISOString(),createdBy:userName||“User”},
+{id:uid(),accountId:f.toAccount,  date:f.date,payee:`Transfer ← ${fromName}`,category:“Transfer”,amount:amt, memo:f.memo||””,cleared:false,createdAt:new Date().toISOString(),createdBy:userName||“User”},
+]});
+showToast(“Transfer added”); setModal(null);
+};
+const saveRecurring = f => {
+const amount=f.type===“expense”?-Math.abs(parseFloat(f.amount)):Math.abs(parseFloat(f.amount));
+if(selectedRec){
+saveData({…data,recurring:(data.recurring||[]).map(r=>r.id===selectedRec.id?{…r,…f,amount}:r)});
+showToast(“Updated”);
+} else {
+saveData({…data,recurring:[…(data.recurring||[]),{id:uid(),accountId:f.accountId,freq:f.freq,payee:f.payee,category:f.category,amount,memo:f.memo||””,startDate:f.startDate,nextDate:f.startDate,active:true,createdAt:new Date().toISOString()}]});
+showToast(“Recurring saved”);
+}
+setModal(null); setSelectedRec(null);
+};
+const deleteRecurring = id => {
+saveData({…data,recurring:(data.recurring||[]).filter(r=>r.id!==id)});
+showToast(“Deleted”,“error”); setModal(null); setSelectedRec(null);
+};
+const toggleRecurring = id => { saveData({…data,recurring:(data.recurring||[]).map(r=>r.id===id?{…r,active:!r.active}:r)}); setModal(null); setSelectedRec(null); };
+const saveBudgets = b => { saveData({…data,budgets:b}); showToast(“Budgets saved”); };
+const addCategory = name => { if(!name.trim()||data.categories.includes(name.trim())) return; saveData({…data,categories:[…data.categories,name.trim()]}); showToast(“Category added”); };
+const deleteCategory = cat => { if(PRESET_CATEGORIES.includes(cat)){showToast(“Can’t delete preset”,“error”);return;} saveData({…data,categories:data.categories.filter(c=>c!==cat)}); showToast(“Category deleted”,“error”); };
+const exportCSV = () => {
+const filteredTx=(data?.transactions||[]).filter(t=>t.date>=reportRange.start&&t.date<=reportRange.end);
+const rows=[[“Date”,“Account”,“Payee”,“Category”,“Amount”,“Memo”,“Cleared”],…filteredTx.map(t=>{const a=data.accounts.find(x=>x.id===t.accountId);return[t.date,a?.name||””,t.payee,t.category,t.amount.toFixed(2),t.memo,t.cleared?“Y”:“N”];})];
+const csv=rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(”,”)).join(”\n”);
+const a=document.createElement(“a”);a.href=“data:text/csv;charset=utf-8,”+encodeURIComponent(csv);a.download=“transactions.csv”;a.click();
+showToast(“CSV exported”);
+};
+const exportJSON = () => {
+const a=document.createElement(“a”);a.href=“data:application/json;charset=utf-8,”+encodeURIComponent(JSON.stringify(data,null,2));a.download=`BajusFinance-backup-${today()}.json`;a.click();
+localStorage.setItem(“ck-last-backup”, Date.now().toString());
+setBackupReminder(false);
+showToast(“Backup saved — store in iCloud Drive!”);
+};
+const importJSON = e => {
+const file=e.target.files?.[0]; if(!file) return;
+const reader=new FileReader();
+reader.onload=ev=>{ try{ const p=JSON.parse(ev.target.result); if(!p.accounts||!p.transactions) throw new Error(); saveData(p); showToast(“Imported”); }catch{ showToast(“Invalid file”,“error”); } };
+reader.readAsText(file); e.target.value=””;
+};
+
+const importCSV = (file, targetAccountId) => {
+const reader = new FileReader();
+reader.onload = ev => {
+try {
+const text = ev.target.result;
+const lines = text.split(/\r?\n/).filter(l => l.trim());
+// Parse header
+const parseRow = row => {
+const cols = []; let cur = “”, inQ = false;
+for (let ch of row) {
+if (ch===’”’) { inQ=!inQ; }
+else if (ch===’,’&&!inQ) { cols.push(cur.trim()); cur=””; }
+else cur+=ch;
+}
+cols.push(cur.trim()); return cols;
+};
+const headers = parseRow(lines[0]).map(h=>h.toLowerCase().replace(/[^a-z]/g,””));
+const idx = k => headers.indexOf(k);
+const dateIdx=idx(“date”), descIdx=idx(“description”), catIdx=idx(“category”),
+amtIdx=idx(“amount”), reconIdx=idx(“reconciled”), memoIdx=idx(“memo”);
+if(dateIdx===-1||descIdx===-1||amtIdx===-1) throw new Error(“Missing required columns”);
+const newTxs = [];
+for(let i=1;i<lines.length;i++){
+const cols = parseRow(lines[i]);
+if(cols.length < 3) continue;
+const rawDate = cols[dateIdx]||””;
+// Parse DD-MM-YYYY → YYYY-MM-DD
+let date = rawDate;
+const dmyMatch = rawDate.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+const mdyMatch = rawDate.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+if(dmyMatch) date = `${dmyMatch[3]}-${dmyMatch[2].padStart(2,"0")}-${dmyMatch[1].padStart(2,"0")}`;
+else if(mdyMatch&&!dmyMatch) date = `${mdyMatch[3]}-${mdyMatch[1].padStart(2,"0")}-${mdyMatch[2].padStart(2,"0")}`;
+const payee = cols[descIdx]||””;
+const category = catIdx>=0 ? (cols[catIdx]||“Other”) : “Other”;
+const amount = parseFloat((cols[amtIdx]||“0”).replace(/[^0-9.-+]/g,””));
+const memo = memoIdx>=0 ? (cols[memoIdx]||””) : “”;
+const cleared = reconIdx>=0 ? cols[reconIdx]===“R” : false;
+if(!payee||isNaN(amount)) continue;
+newTxs.push({id:uid(),accountId:targetAccountId,date,payee,category,amount,memo,cleared,createdAt:new Date().toISOString(),createdBy:“CSV Import”});
+}
+if(newTxs.length===0) throw new Error(“No valid transactions found”);
+saveData({…data,transactions:[…data.transactions,…newTxs]});
+showToast(`Imported ${newTxs.length} transactions`);
+} catch(e) { showToast(“Import failed: “+e.message,“error”); }
+};
+reader.readAsText(file);
+};
+
+if(loading) return <div style={S.loader}><div style={S.spin}/></div>;
+
+const openRegister = accId => { setActiveAccountId(accId); setTxFilter(””); setScreen(“register”); };
+
+return (
+<div style={S.app}>
+{namePrompt && <NameModal onSave={name=>{localStorage.setItem(“ck-username”,name);setUserName(name);setNamePrompt(false);}}/>}
+{toast && <div style={{…S.toast,background:toast.type===“error”?”#ef4444”:”#16a34a”}}>{toast.msg}</div>}
+
+```
+  {/* ── Accounts Screen ── */}
+  {screen==="accounts" && (
+    <div style={S.screen}>
+      {/* Backup Reminder Banner */}
+      {backupReminder&&(
+        <div style={S.backupBanner}>
+          <span style={S.backupBannerText}>⏰ It's been 7+ days since your last iCloud backup</span>
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <button style={S.backupBannerBtn} onClick={exportJSON}>Backup Now</button>
+            <button style={S.backupBannerDismiss} onClick={()=>{localStorage.setItem("ck-last-backup",Date.now().toString());setBackupReminder(false);}}>Remind Later</button>
+          </div>
+        </div>
+      )}
+
+      {/* Net Worth Hero */}
+      <div style={S.netWorthHero}>
+        <div style={S.appTitleHero}>Bajus Family Finances</div>
+        <div style={S.netWorthLabel}>Net Worth</div>
+        <div style={{...S.netWorthAmt, color:"#fff"}}>{fmt(netWorth)}</div>
+      </div>
+
+      <DraggableAccountList
+        accounts={data.accounts}
+        accountBal={accountBal}
+        onReorder={accs=>saveData({...data,accounts:accs})}
+        onOpen={openRegister}
+      />
+    </div>
+  )}
+
+  {/* ── Register Screen ── */}
+  {screen==="register" && activeAccount && (
+    <div style={S.screen}>
+      <div style={S.topBar}>
+        <button style={S.backBtn} onClick={()=>setScreen("accounts")}>‹ Accounts</button>
+        <button style={S.topBarTitleBtn} onClick={()=>setModal("editAccount")}>
+          {activeAccount.name} <span style={S.editPencil}>✎</span>
+        </button>
+        <div style={{width:60}}/>
+      </div>
+      {/* Account balance sub-header */}
+      <div style={S.registerHeader}>
+        <div style={S.registerBalance}>
+          <span style={S.registerBalLabel}>Balance</span>
+          <span style={{...S.registerBalAmt,color:accountBal(activeAccountId)<0?"#ef4444":"#16a34a"}}>{fmt(accountBal(activeAccountId))}</span>
+        </div>
+        <button style={S.transferBtnW} onClick={()=>setModal("transfer")}>⇄ Transfer</button>
+      </div>
+      <div style={S.searchWrap}>
+        <input style={S.searchW} placeholder="Search transactions…" value={txFilter} onChange={e=>setTxFilter(e.target.value)}/>
+      </div>
+      <div style={S.txListW}>
+        {(data.transactions||[])
+          .filter(t=>t.accountId===activeAccountId)
+          .filter(t=>!txFilter||t.payee.toLowerCase().includes(txFilter.toLowerCase())||t.category.toLowerCase().includes(txFilter.toLowerCase()))
+          .sort((a,b)=>b.date.localeCompare(a.date)||b.createdAt.localeCompare(a.createdAt))
+          .map((tx,i,arr)=>{
+            const isLast=i===arr.length-1;
+            return (
+              <div key={tx.id} style={{...S.txRowW,...(!isLast?{borderBottom:"1px solid #f1f5f9"}:{})}} onClick={()=>{setSelectedTx(tx);setModal("editTx");}}>
+                <div style={{...S.txClearedDot,background:tx.cleared?"#16a34a":"#e2e8f0"}} onClick={e=>{e.stopPropagation();toggleCleared(tx.id);}}/>
+                <div style={S.txRowBody}>
+                  <div style={S.txRowTop}>
+                    <span style={S.txRowPayee}>{tx.payee}</span>
+                    <span style={{...S.txRowAmt,color:tx.amount>=0?"#16a34a":"#1e293b"}}>{tx.amount>=0?"+":""}{fmt(tx.amount)}</span>
+                  </div>
+                  <div style={S.txRowBot}>
+                    <span style={S.txRowCat}>{tx.category}</span>
+                    <span style={S.txRowDate}>{tx.date}</span>
+                  </div>
+                  {tx.memo&&<div style={S.txRowMemo}>{tx.memo}</div>}
+                  {tx.recurringId&&<div style={S.txRowTag}>🔁 Recurring</div>}
+                </div>
+                <div style={S.txChev}>›</div>
+              </div>
+            );
+          })
+        }
+        {(data.transactions||[]).filter(t=>t.accountId===activeAccountId).length===0&&(
+          <div style={S.emptyW}>No transactions yet.<br/>Tap ＋ to add one.</div>
+        )}
+      </div>
+    </div>
+  )}
+
+  {/* ── Reports Screen ── */}
+  {screen==="reports" && (
+    <ReportsScreen data={data} reportRange={reportRange} setReportRange={setReportRange} reportTab={reportTab} setReportTab={setReportTab} exportCSV={exportCSV}/>
+  )}
+
+  {/* ── Recurring Screen ── */}
+  {screen==="recurring" && (
+    <div style={S.screen}>
+      <div style={S.topBar}>
+        <span style={S.topBarTitle}>Recurring</span>
+        <button style={S.topBarBtn} onClick={()=>{setSelectedRec(null);setModal("recurring");}}>＋</button>
+      </div>
+      {(data.recurring||[]).length===0&&<div style={S.emptyW}>No recurring transactions.<br/>Add bills or subscriptions.</div>}
+      <div style={S.txListW}>
+        {(data.recurring||[]).map((r,i,arr)=>{
+          const acc=data.accounts.find(a=>a.id===r.accountId);
+          const isLast=i===arr.length-1;
+          return (
+            <div key={r.id} style={{...S.txRowW,...(!isLast?{borderBottom:"1px solid #f1f5f9"}:{}),opacity:r.active?1:0.45}} onClick={()=>{setSelectedRec(r);setModal("recurring");}}>
+              <div style={{...S.txClearedDot,background:r.active?"#2563eb":"#e2e8f0"}}/>
+              <div style={S.txRowBody}>
+                <div style={S.txRowTop}>
+                  <span style={S.txRowPayee}>{r.payee}</span>
+                  <span style={{...S.txRowAmt,color:r.amount>=0?"#16a34a":"#1e293b"}}>{r.amount>=0?"+":""}{fmt(r.amount)}</span>
+                </div>
+                <div style={S.txRowBot}>
+                  <span style={S.txRowCat}>{r.freq} · {r.category}</span>
+                  <span style={S.txRowDate}>Next: {r.nextDate}</span>
+                </div>
+                <div style={S.txRowTag}>{acc?.name} · {r.active?"Active":"Paused"}</div>
+              </div>
+              <div style={S.txChev}>›</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  )}
+
+  {/* ── Settings Screen ── */}
+  {screen==="settings" && (
+    <SettingsScreen data={data} exportJSON={exportJSON} importJSON={importJSON} exportCSV={exportCSV} importCSV={importCSV} accounts={data.accounts}
+      onAddCategory={addCategory} onDeleteCategory={deleteCategory}
+      onSaveBudgets={saveBudgets}/>
+  )}
+
+  {/* ── Bottom Nav ── */}
+  <nav style={S.bottomNav}>
+    <button style={{...S.navBtn,...(screen==="accounts"||screen==="register"?S.navBtnActive:{})}} onClick={()=>setScreen("accounts")}>
+      <NavIcon name="accounts" active={screen==="accounts"||screen==="register"}/>
+      <span style={{...S.navLabel,...(screen==="accounts"||screen==="register"?{color:"#2563eb"}:{})}}>Accounts</span>
+    </button>
+    <button style={{...S.navBtn,...(screen==="reports"?S.navBtnActive:{})}} onClick={()=>setScreen("reports")}>
+      <NavIcon name="reports" active={screen==="reports"}/>
+      <span style={{...S.navLabel,...(screen==="reports"?{color:"#2563eb"}:{})}}>Reports</span>
+    </button>
+    <button style={S.navPlusBtn} onClick={()=>screen==="register"?setModal("addTx"):setModal("addAccount")}>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </button>
+    <button style={{...S.navBtn,...(screen==="recurring"?S.navBtnActive:{})}} onClick={()=>setScreen("recurring")}>
+      <NavIcon name="recurring" active={screen==="recurring"}/>
+      <span style={{...S.navLabel,...(screen==="recurring"?{color:"#2563eb"}:{})}}>Recurring</span>
+    </button>
+    <button style={{...S.navBtn,...(screen==="settings"?S.navBtnActive:{})}} onClick={()=>setScreen("settings")}>
+      <NavIcon name="settings" active={screen==="settings"}/>
+      <span style={{...S.navLabel,...(screen==="settings"?{color:"#2563eb"}:{})}}>Settings</span>
+    </button>
+  </nav>
+
+  {/* ── Modals ── */}
+  {(modal==="addTx"||modal==="editTx")&&(
+    <TxModal tx={modal==="editTx"?selectedTx:null} categories={data.categories} payeeMap={payeeMap}
+      onSave={modal==="addTx"?addTransaction:editTransaction}
+      onDelete={modal==="editTx"?()=>{deleteTransaction(selectedTx.id); setModal(null); setSelectedTx(null);}:null}
+      onClose={()=>{setModal(null);setSelectedTx(null);}}/>
+  )}
+  {modal==="addAccount"&&<AccountModal onSave={addAccount} onClose={()=>setModal(null)}/>}
+  {modal==="editAccount"&&<AccountModal account={activeAccount} onSave={editAccount} onDelete={deleteAccount} onClose={()=>setModal(null)}/>}
+  {modal==="transfer"&&<TransferModal accounts={data.accounts} onSave={addTransfer} onClose={()=>setModal(null)}/>}
+  {modal==="recurring"&&<RecurringModal rec={selectedRec} accounts={data.accounts} categories={data.categories} activeAccountId={activeAccountId}
+      onSave={saveRecurring}
+      onDelete={selectedRec?()=>deleteRecurring(selectedRec.id):null}
+      onToggle={selectedRec?()=>toggleRecurring(selectedRec.id):null}
+      onClose={()=>{setModal(null);setSelectedRec(null);}}/>}
+</div>
+```
+
+);
+}
+
+// ─── Draggable Account List ──────────────────────────────────────────────────
+function DraggableAccountList({accounts, accountBal, onReorder, onOpen}){
+const moveAccount = (id, dir) => {
+const arr = […accounts];
+const i = arr.findIndex(a=>a.id===id);
+const j = i + dir;
+if(j < 0 || j >= arr.length) return;
+[arr[i], arr[j]] = [arr[j], arr[i]];
+onReorder(arr);
+};
+
+return (
+<div style={S.accountList}>
+{accounts.map((a,i)=>{
+const bal = accountBal(a.id);
+const isLast = i===accounts.length-1;
+return (
+<div key={a.id} style={{…S.accountRow,…(!isLast?{borderBottom:“1px solid #f1f5f9”}:{})}}>
+<div style={S.reorderBtns}>
+<button
+style={{…S.reorderBtn, opacity: i===0 ? 0.2 : 1}}
+disabled={i===0}
+onClick={e=>{e.stopPropagation(); moveAccount(a.id,-1);}}
+>
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+<polyline points="18 15 12 9 6 15"/>
+</svg>
+</button>
+<button
+style={{…S.reorderBtn, opacity: isLast ? 0.2 : 1}}
+disabled={isLast}
+onClick={e=>{e.stopPropagation(); moveAccount(a.id,1);}}
+>
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+<polyline points="6 9 12 15 18 9"/>
+</svg>
+</button>
+</div>
+<div style={{…S.accountRowIcon,background:a.color+“15”}} onClick={()=>onOpen(a.id)}>
+<AccountIcon type={a.type} color={a.color} size={20}/>
+</div>
+<div style={S.accountRowBody} onClick={()=>onOpen(a.id)}>
+<div style={S.accountRowName}>{a.name}</div>
+<div style={S.accountRowType}>{a.type}</div>
+</div>
+<div style={S.accountRowRight} onClick={()=>onOpen(a.id)}>
+<div style={{…S.accountRowBal,color:bal<0?”#ef4444”:”#16a34a”}}>{fmt(bal)}</div>
+<div style={S.accountRowChev}>›</div>
+</div>
+</div>
+);
+})}
+</div>
+);
+}
+
+// ─── Nav Icon ─────────────────────────────────────────────────────────────────
+function NavIcon({name, active}){
+const stroke = active ? “#2563eb” : “#94a3b8”;
+const sw = active ? 2 : 1.7;
+if(name===“accounts”) return (
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+<rect x="2" y="3" width="20" height="5" rx="2"/>
+<rect x="2" y="10" width="9" height="11" rx="2"/>
+<rect x="13" y="10" width="9" height="11" rx="2"/>
+</svg>
+);
+if(name===“reports”) return (
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+<line x1="18" y1="20" x2="18" y2="10"/>
+<line x1="12" y1="20" x2="12" y2="4"/>
+<line x1="6" y1="20" x2="6" y2="14"/>
+</svg>
+);
+if(name===“recurring”) return (
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+<polyline points="1 4 1 10 7 10"/>
+<path d="M3.51 15a9 9 0 1 0 .49-4.49"/>
+</svg>
+);
+if(name===“settings”) return (
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+<circle cx="12" cy="12" r="3"/>
+<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+</svg>
+);
+return null;
+}
+
+// ─── Reports Screen ───────────────────────────────────────────────────────────
+function ReportsScreen({data,reportRange,setReportRange,reportTab,setReportTab,exportCSV}){
+const allAccIds = (data?.accounts||[]).map(a=>a.id);
+const allPayees = […new Set((data?.transactions||[]).map(t=>t.payee).filter(Boolean))].sort();
+const [selAccounts,setSelAccounts] = useState(()=>new Set(allAccIds));
+const [selPayees,setSelPayees] = useState(()=>new Set(allPayees));
+const [showFilters,setShowFilters] = useState(false);
+
+// Keep filter sets in sync when accounts/payees change
+const filteredTx=(data?.transactions||[]).filter(t=>
+t.date>=reportRange.start&&t.date<=reportRange.end&&
+selAccounts.has(t.accountId)&&
+selPayees.has(t.payee)
+);
+const spendByCat=filteredTx.reduce((a,t)=>{ if(t.amount<0){const k=t.category||“Other”;a[k]=(a[k]||0)+Math.abs(t.amount);} return a; },{});
+const totalSpent=Object.values(spendByCat).reduce((a,b)=>a+b,0);
+const totalIncome=filteredTx.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
+const spendByPayee=filteredTx.reduce((a,t)=>{
+const k=t.payee||”?”; if(!a[k]) a[k]={expense:0,income:0,accounts:new Set()};
+if(t.amount<0) a[k].expense+=Math.abs(t.amount); else a[k].income+=t.amount;
+a[k].accounts.add((data?.accounts||[]).find(x=>x.id===t.accountId)?.name||”?”);
+return a;
+},{});
+const spendByAcct=(data?.accounts||[]).map(a=>({
+name:a.name,color:a.color,
+spent:filteredTx.filter(t=>t.accountId===a.id&&t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0),
+income:filteredTx.filter(t=>t.accountId===a.id&&t.amount>0).reduce((s,t)=>s+t.amount,0),
+}));
+const monthlyTrend=Array.from({length:6},(_,i)=>getMonthRange(i-5)).map(m=>{
+const txs=(data?.transactions||[]).filter(t=>t.date>=m.start&&t.date<=m.end);
+return{label:m.label,income:txs.filter(t=>t.amount>0).reduce((a,t)=>a+t.amount,0),expenses:txs.filter(t=>t.amount<0).reduce((a,t)=>a+Math.abs(t.amount),0)};
+});
+const maxTrend=Math.max(…monthlyTrend.flatMap(m=>[m.income,m.expenses]),1);
+
+return (
+<div style={S.screen}>
+<div style={S.topBar}><span style={S.topBarTitle}>Reports</span><button style={S.topBarBtnSm} onClick={exportCSV}>CSV</button></div>
+<div style={S.reportDateRow}>
+<input type=“date” style={S.dateInputW} value={reportRange.start} onChange={e=>setReportRange(r=>({…r,start:e.target.value}))}/>
+<span style={{color:”#94a3b8”,fontSize:14}}>–</span>
+<input type=“date” style={S.dateInputW} value={reportRange.end} onChange={e=>setReportRange(r=>({…r,end:e.target.value}))}/>
+<button style={S.filterToggleBtn} onClick={()=>setShowFilters(f=>!f)}>
+<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+{selAccounts.size<allAccIds.length||selPayees.size<allPayees.length?<span style={S.filterDot}/>:null}
+</button>
+</div>
+{showFilters&&(
+<div style={S.filterPanel}>
+<div style={S.filterSection}>
+<div style={S.filterLabel}>Accounts</div>
+<div style={S.filterChips}>
+{(data?.accounts||[]).map(a=>{
+const on=selAccounts.has(a.id);
+return <button key={a.id} style={{…S.filterChip,…(on?{background:a.color,color:”#fff”,borderColor:a.color}:{})}}
+onClick={()=>{ const s=new Set(selAccounts); on?s.delete(a.id):s.add(a.id); setSelAccounts(s); }}>{a.name}</button>;
+})}
+<button style={S.filterChipAll} onClick={()=>setSelAccounts(new Set(allAccIds))}>All</button>
+</div>
+</div>
+<div style={S.filterSection}>
+<div style={S.filterLabel}>
+Payees
+<button style={S.filterChipAll} onClick={()=>setSelPayees(new Set(allPayees))}>All</button>
+<button style={{…S.filterChipAll,marginLeft:4}} onClick={()=>setSelPayees(new Set())}>None</button>
+</div>
+<div style={S.filterChips}>
+{allPayees.map(p=>{
+const on=selPayees.has(p);
+return <button key={p} style={{…S.filterChip,…(on?{background:”#2563eb”,color:”#fff”,borderColor:”#2563eb”}:{})}}
+onClick={()=>{ const s=new Set(selPayees); on?s.delete(p):s.add(p); setSelPayees(s); }}>{p}</button>;
+})}
+</div>
+</div>
+</div>
+)}
+{/* Summary */}
+<div style={S.summaryStrip}>
+<div style={S.summaryItem}><div style={{color:”#16a34a”,fontWeight:700,fontSize:16}}>{fmt(totalIncome)}</div><div style={S.summaryLbl}>Income</div></div>
+<div style={S.summaryDivider}/>
+<div style={S.summaryItem}><div style={{color:”#ef4444”,fontWeight:700,fontSize:16}}>{fmt(totalSpent)}</div><div style={S.summaryLbl}>Expenses</div></div>
+<div style={S.summaryDivider}/>
+<div style={S.summaryItem}><div style={{color:totalIncome-totalSpent>=0?”#16a34a”:”#ef4444”,fontWeight:700,fontSize:16}}>{fmt(totalIncome-totalSpent)}</div><div style={S.summaryLbl}>Net</div></div>
+</div>
+{/* Sub-tabs */}
+<div style={S.reportTabRow}>
+{[[“category”,“Category”],[“payee”,“Payee”],[“account”,“Account”],[“trend”,“Trend”],[“budget”,“Budget”],[“search”,“Search”]].map(([k,l])=>(
+<button key={k} style={{…S.reportTabW,…(reportTab===k?S.reportTabActiveW:{})}} onClick={()=>setReportTab(k)}>{l}</button>
+))}
+</div>
+<div style={{...S.screenScroll,paddingBottom:90}}>
+{reportTab===“category”&&(
+<DrillDownReport
+entries={Object.entries(spendByCat).sort((a,b)=>b[1]-a[1]).map(([key,amt])=>({key, label:key, amt, pct:totalSpent>0?(amt/totalSpent)*100:0}))}
+transactions={filteredTx}
+accounts={data.accounts}
+filterKey=“category”
+total={totalSpent}
+emptyMsg=“No expenses in range.”
+/>
+)}
+{reportTab===“payee”&&(
+<DrillDownReport
+entries={Object.entries(spendByPayee).sort((a,b)=>b[1].expense-a[1].expense).map(([key,d])=>({key, label:key, amt:d.expense, income:d.income, pct:totalSpent>0?(d.expense/totalSpent)*100:0, sub:[…d.accounts].join(”, “)}))}
+transactions={filteredTx}
+accounts={data.accounts}
+filterKey=“payee”
+total={totalSpent}
+emptyMsg=“No transactions in range.”
+/>
+)}
+{reportTab===“account”&&(
+<div>
+{spendByAcct.map(a=>{
+const maxVal=Math.max(…spendByAcct.flatMap(x=>[x.income,x.spent]),1);
+return (
+<div key={a.name} style={S.acctReportRowW}>
+<div style={{fontWeight:700,color:a.color,marginBottom:10}}>{a.name}</div>
+<div style={S.reportRow}><span style={S.acctBarLbl}>Income</span><div style={S.reportBarWrap}><div style={{…S.reportBar,width:`${(a.income/maxVal)*100}%`,background:”#16a34a”}}/></div><span style={{…S.reportRowAmt,color:”#16a34a”}}>{fmt(a.income)}</span></div>
+<div style={{...S.reportRow,marginTop:6}}><span style={S.acctBarLbl}>Expenses</span><div style={S.reportBarWrap}><div style={{…S.reportBar,width:`${(a.spent/maxVal)*100}%`,background:”#ef4444”}}/></div><span style={{…S.reportRowAmt,color:”#ef4444”}}>{fmt(a.spent)}</span></div>
+</div>
+);
+})}
+</div>
+)}
+{reportTab===“trend”&&(
+<div style={{padding:“8px 0”}}>
+<div style={S.trendLegend}><span style={{color:”#16a34a”}}>■ Income</span><span style={{color:”#ef4444”,marginLeft:12}}>■ Expenses</span></div>
+<div style={S.trendChart}>
+{monthlyTrend.map((m,i)=>(
+<div key={i} style={S.trendCol}>
+<div style={S.trendBars}>
+<div style={{…S.trendBar,height:`${(m.income/maxTrend)*100}%`,background:”#16a34a”}}/>
+<div style={{…S.trendBar,height:`${(m.expenses/maxTrend)*100}%`,background:”#ef4444”}}/>
+</div>
+<div style={S.trendLabel}>{m.label}</div>
+</div>
+))}
+</div>
+</div>
+)}
+{reportTab===“budget”&&(
+<div>
+{Object.entries(data.budgets||{}).map(([cat,budget])=>{
+const spent=(spendByCat[cat]||0),pct=budget>0?Math.min(100,(spent/budget)*100):0,over=spent>budget;
+return(
+<div key={cat} style={{paddingBottom:12}}>
+<div style={{display:“flex”,justifyContent:“space-between”,marginBottom:4}}><span style={S.reportRowLabel}>{cat}</span><span style={{fontSize:13,color:over?”#ef4444”:”#64748b”}}>{fmt(spent)} / {fmt(budget)}</span></div>
+<div style={S.reportBarWrap}><div style={{…S.reportBar,width:`${pct}%`,background:over?”#ef4444”:pct>80?”#f59e0b”:”#2563eb”}}/></div>
+</div>
+);
+})}
+</div>
+)}
+{reportTab===“search”&&<SearchReportW transactions={filteredTx} accounts={data.accounts} categories={data.categories}/>}
+</div>
+</div>
+);
+}
+
+// ─── Drill Down Report ───────────────────────────────────────────────────────
+function DrillDownReport({entries, transactions, accounts, filterKey, total, emptyMsg}){
+const [expanded, setExpanded] = useState(null);
+
+if(entries.length===0) return <div style={S.emptyW}>{emptyMsg}</div>;
+
+return (
+<div>
+{entries.map(({key, label, amt, income, pct, sub})=>{
+const isOpen = expanded===key;
+const txns = transactions
+.filter(t => filterKey===“category” ? t.category===key : t.payee===key)
+.sort((a,b)=>b.date.localeCompare(a.date));
+return (
+<div key={key} style={{marginBottom:6}}>
+{/* Bar row — tap to expand */}
+<div
+style={{…S.drillRow, background: isOpen?”#eff6ff”:”#fff”, borderRadius: isOpen?“12px 12px 0 0”:12}}
+onClick={()=>setExpanded(isOpen?null:key)}
+>
+<div style={S.drillLeft}>
+<div style={S.drillLabel}>{label}</div>
+{sub&&<div style={S.drillSub}>{sub}</div>}
+<div style={{…S.reportBarWrap, marginTop:5}}>
+<div style={{…S.reportBar, width:`${Math.min(100,pct)}%`}}/>
+</div>
+</div>
+<div style={S.drillRight}>
+{amt>0&&<div style={S.drillAmt}>{fmt(amt)}</div>}
+{income>0&&<div style={{…S.drillAmt,color:”#16a34a”,fontSize:12}}>+{fmt(income)}</div>}
+<div style={{…S.drillChev, transform: isOpen?“rotate(90deg)”:“rotate(0deg)”}}>›</div>
+</div>
+</div>
+{/* Expanded transactions */}
+{isOpen&&(
+<div style={S.drillTxList}>
+{txns.length===0&&<div style={{padding:“12px 16px”,color:”#94a3b8”,fontSize:13}}>No transactions.</div>}
+{txns.map((t,i)=>{
+const acc=accounts.find(a=>a.id===t.accountId);
+return (
+<div key={t.id} style={{…S.drillTxRow,…(i<txns.length-1?{borderBottom:“1px solid #f1f5f9”}:{})}}>
+<div style={S.txRowBody}>
+<div style={S.txRowTop}>
+<span style={{...S.txRowPayee,fontSize:14}}>{filterKey===“category”?t.payee:t.category}</span>
+<span style={{...S.txRowAmt,color:t.amount>=0?”#16a34a”:”#1e293b”,fontSize:14}}>{t.amount>=0?”+”:””}{fmt(t.amount)}</span>
+</div>
+<div style={S.txRowBot}>
+<span style={S.txRowCat}>{acc?.name}</span>
+<span style={S.txRowDate}>{t.date}</span>
+</div>
+{t.memo&&<div style={S.txRowMemo}>{t.memo}</div>}
+</div>
+</div>
+);
+})}
+<div style={S.drillTxTotal}>
+<span style={{color:”#64748b”,fontSize:13}}>{txns.length} transaction{txns.length!==1?“s”:””}</span>
+<span style={{fontWeight:700,fontSize:13,color:txns.reduce((s,t)=>s+t.amount,0)>=0?”#16a34a”:”#ef4444”}}>{fmt(txns.reduce((s,t)=>s+t.amount,0))}</span>
+</div>
+</div>
+)}
+</div>
+);
+})}
+</div>
+);
+}
+
+// ─── Search Report ────────────────────────────────────────────────────────────
+function SearchReportW({transactions,accounts,categories}){
+const [q,setQ]=useState(””),[cat,setCat]=useState(””),[acct,setAcct]=useState(””);
+const filtered=transactions.filter(t=>{
+if(q&&!t.payee.toLowerCase().includes(q.toLowerCase())&&!(t.memo||””).toLowerCase().includes(q.toLowerCase())) return false;
+if(cat&&t.category!==cat) return false;
+if(acct&&t.accountId!==acct) return false;
+return true;
+}).sort((a,b)=>b.date.localeCompare(a.date));
+const total=filtered.reduce((s,t)=>s+t.amount,0);
+return (
+<div>
+<input style={S.searchW} placeholder=“Search payee or memo…” value={q} onChange={e=>setQ(e.target.value)}/>
+<div style={{display:“flex”,gap:6,marginBottom:10}}>
+<select style={{…S.selectW,flex:1}} value={cat} onChange={e=>setCat(e.target.value)}><option value="">All Categories</option>{categories.map(c=><option key={c}>{c}</option>)}</select>
+<select style={{…S.selectW,flex:1}} value={acct} onChange={e=>setAcct(e.target.value)}><option value="">All Accounts</option>{accounts.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select>
+</div>
+<div style={{display:“flex”,justifyContent:“space-between”,padding:“8px 0”,borderBottom:“1px solid #f1f5f9”,marginBottom:8}}>
+<span style={{fontSize:13,color:”#64748b”}}>{filtered.length} results</span>
+<span style={{fontSize:13,fontWeight:700,color:total>=0?”#16a34a”:”#ef4444”}}>{fmt(total)}</span>
+</div>
+{filtered.map((t,i,arr)=>{
+const acc=accounts.find(a=>a.id===t.accountId);
+return (
+<div key={t.id} style={{…S.txRowW,…(i<arr.length-1?{borderBottom:“1px solid #f1f5f9”}:{})}}>
+<div style={{…S.txClearedDot,background:t.cleared?”#16a34a”:”#e2e8f0”}}/>
+<div style={S.txRowBody}>
+<div style={S.txRowTop}><span style={S.txRowPayee}>{t.payee}</span><span style={{...S.txRowAmt,color:t.amount>=0?”#16a34a”:”#1e293b”}}>{t.amount>=0?”+”:””}{fmt(t.amount)}</span></div>
+<div style={S.txRowBot}><span style={S.txRowCat}>{t.category}</span><span style={S.txRowDate}>{t.date} · {acc?.name}</span></div>
+</div>
+</div>
+);
+})}
+{filtered.length===0&&<div style={S.emptyW}>No matching transactions.</div>}
+</div>
+);
+}
+
+// ─── Settings Screen ──────────────────────────────────────────────────────────
+function SettingsScreen({data,exportJSON,importJSON,exportCSV,importCSV,accounts,onAddCategory,onDeleteCategory,onSaveBudgets}){
+const [settingsTab,setSettingsTab]=useState(“categories”);
+return (
+<div style={S.screen}>
+<div style={S.topBar}><span style={S.topBarTitle}>Settings</span></div>
+<div style={S.reportTabRow}>
+{[[“categories”,“Categories”],[“budgets”,“Budgets”],[“data”,“Data”]].map(([k,l])=>(
+<button key={k} style={{…S.reportTabW,…(settingsTab===k?S.reportTabActiveW:{})}} onClick={()=>setSettingsTab(k)}>{l}</button>
+))}
+</div>
+<div style={{...S.screenScroll,paddingBottom:90}}>
+{settingsTab===“categories”&&<CategoryManagerW categories={data.categories||[]} onAdd={onAddCategory} onDelete={onDeleteCategory}/>}
+{settingsTab===“budgets”&&<BudgetEditorW budgets={data.budgets||{}} categories={data.categories||[]} onSave={onSaveBudgets}/>}
+{settingsTab===“data”&&(
+<div>
+<div style={S.settingsSection}>
+<div style={S.settingsSectionTitle}>Import from Accounts3 / CSV</div>
+<p style={{fontSize:13,color:”#64748b”,lineHeight:1.6,marginBottom:10}}>Import a CSV export from Accounts3 or any app with Date, Description, Category, Amount columns. Choose which account to import into.</p>
+<CSVImporter accounts={accounts} onImport={importCSV}/>
+</div>
+<div style={S.settingsDivider}/>
+<div style={S.settingsSection}>
+<div style={S.settingsSectionTitle}>☁️ iCloud Backup</div>
+<p style={{fontSize:13,color:”#64748b”,lineHeight:1.6,marginBottom:10}}>Tap below to download a backup file, then save it to <strong>iCloud Drive</strong> when prompted. Do this weekly to keep your data safe.</p>
+<button style={{…S.settingsBtn,background:”#14532d”}} onClick={exportJSON}>☁️ Backup to iCloud Drive</button>
+
+```
+        </div>
+        <div style={S.settingsDivider}/>
+        <div style={S.settingsSection}>
+          <div style={S.settingsSectionTitle}>Restore from Backup</div>
+          <button style={S.settingsBtn} onClick={exportJSON}>⬇ Download JSON Backup</button>
+          <label style={S.settingsBtnOutline}>⬆ Import JSON Backup<input type="file" accept=".json" style={{display:"none"}} onChange={importJSON}/></label>
+          <button style={S.settingsBtnOutline} onClick={exportCSV}>⬇ Export CSV</button>
+        </div>
+        <div style={S.settingsSection}>
+          <div style={S.settingsSectionTitle}>Storage Info</div>
+          <p style={{fontSize:13,color:"#64748b",lineHeight:1.6}}>Data is saved in your browser's local storage, tied to this page. Use the JSON backup regularly to keep your data safe.</p>
+          <div style={S.dataStatsW}>
+            <div style={S.dataStatW}><div style={S.dataStatNum}>{(data.transactions||[]).length}</div><div style={S.dataStatLbl}>Transactions</div></div>
+            <div style={S.dataStatW}><div style={S.dataStatNum}>{(data.accounts||[]).length}</div><div style={S.dataStatLbl}>Accounts</div></div>
+            <div style={S.dataStatW}><div style={S.dataStatNum}>{(data.recurring||[]).filter(r=>r.active).length}</div><div style={S.dataStatLbl}>Recurring</div></div>
+          </div>
+        </div>
+      </div>
+    )}
+  </div>
+</div>
+```
+
+);
+}
+
+// ─── CSV Importer ────────────────────────────────────────────────────────────
+function CSVImporter({accounts, onImport}){
+const [targetAccount, setTargetAccount] = useState(accounts[0]?.id||””);
+const handleFile = e => {
+const file = e.target.files?.[0];
+if(!file) return;
+onImport(file, targetAccount);
+e.target.value=””;
+};
+return (
+<div style={{display:“flex”,flexDirection:“column”,gap:10}}>
+<div>
+<div style={S.inputLabelW}>Import into account</div>
+<select style={S.inputW} value={targetAccount} onChange={e=>setTargetAccount(e.target.value)}>
+{accounts.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
+</select>
+</div>
+<label style={{…S.settingsBtn,display:“block”,textAlign:“center”,cursor:“pointer”}}>
+⬆ Choose CSV File to Import
+<input type=“file” accept=”.csv,text/csv” style={{display:“none”}} onChange={handleFile}/>
+</label>
+<p style={{fontSize:12,color:”#94a3b8”,margin:0}}>Supports Accounts3 exports. Date, Description, Category, Amount columns required.</p>
+</div>
+);
+}
+
+// ─── Category Manager ─────────────────────────────────────────────────────────
+function CategoryManagerW({categories,onAdd,onDelete}){
+const [newCat,setNewCat]=useState(””);
+return (
+<div>
+<div style={{display:“flex”,gap:8,marginBottom:16}}>
+<input style={{…S.inputW,flex:1}} placeholder=“New category…” value={newCat} onChange={e=>setNewCat(e.target.value)}/>
+<button style={{…S.btnPrimary,width:“auto”,padding:“10px 18px”}} onClick={()=>{if(newCat.trim()){onAdd(newCat);setNewCat(””);}}}>Add</button>
+</div>
+<div style={{display:“flex”,flexWrap:“wrap”,gap:8}}>
+{categories.map(c=>(
+<div key={c} style={S.catChipW}>
+{c}
+{!PRESET_CATEGORIES.includes(c)&&<button style={S.catChipDelW} onClick={()=>onDelete(c)}>✕</button>}
+</div>
+))}
+</div>
+</div>
+);
+}
+
+// ─── Budget Editor ────────────────────────────────────────────────────────────
+function BudgetEditorW({budgets,categories,onSave}){
+const [local,setLocal]=useState({…budgets});
+return (
+<div>
+{categories.filter(c=>c!==“Income”&&c!==“Transfer”).map(cat=>(
+<div key={cat} style={S.budgetRowW}>
+<span style={S.budgetLabelW}>{cat}</span>
+<AmountInput style={S.budgetInputW} placeholder=“0” value={local[cat]||””} onChange={v=>setLocal(b=>({…b,[cat]:parseFloat(v)||0}))}/>
+</div>
+))}
+<button style={{…S.btnPrimary,marginTop:16}} onClick={()=>onSave(local)}>Save Budgets</button>
+</div>
+);
+}
+
+// ─── Amount Input ────────────────────────────────────────────────────────────
+// Shows commas while typing, stores raw numeric string underneath
+function AmountInput({value, onChange, placeholder=“0.00”, style}){
+const [display, setDisplay] = useState(()=>formatAmt(value));
+
+function formatAmt(val){
+if(!val && val!==0) return “”;
+const str = String(val).replace(/[^0-9.]/g,””);
+const parts = str.split(”.”);
+const intPart = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g,”,”);
+return parts.length>1 ? intPart+”.”+parts[1] : intPart;
+}
+
+const handleChange = e => {
+const raw = e.target.value.replace(/[^0-9.]/g,””);
+// Only allow one decimal point
+const parts = raw.split(”.”);
+const cleaned = parts.length>2 ? parts[0]+”.”+parts.slice(1).join(””) : raw;
+const formatted = formatAmt(cleaned);
+setDisplay(formatted);
+onChange(cleaned);
+};
+
+// Sync if value changes externally (e.g. on modal open)
+useEffect(()=>{ setDisplay(formatAmt(value)); },[value]);
+
+return (
+<input
+style={style}
+type="text"
+inputMode="decimal"
+placeholder={placeholder}
+value={display}
+onChange={handleChange}
+/>
+);
+}
+
+// ─── Confirm Delete ───────────────────────────────────────────────────────────
+function ConfirmDelete({label, onConfirm}){
+const [open,setOpen]=useState(false);
+if(!open) return <button style={S.btnDanger} onClick={()=>setOpen(true)}>{label}</button>;
+return (
+<div style={S.confirmRow}>
+<span style={{fontSize:14,color:”#ef4444”,fontWeight:600}}>Are you sure?</span>
+<div style={{display:“flex”,gap:8,marginTop:8}}>
+<button style={{...S.btnDanger,flex:1}} onClick={onConfirm}>Yes, Delete</button>
+<button style={{…S.btnSecondary,flex:1}} onClick={()=>setOpen(false)}>Cancel</button>
+</div>
+</div>
+);
+}
+
+// ─── Transaction Modal ────────────────────────────────────────────────────────
+function TxModal({tx,categories,payeeMap,onSave,onDelete,onClose}){
+const [form,setForm]=useState({type:tx?(tx.amount>=0?“income”:“expense”):“expense”,date:tx?.date||today(),payee:tx?.payee||””,category:tx?.category||“Groceries”,amount:tx?Math.abs(tx.amount).toFixed(2):””,memo:tx?.memo||””});
+const [sugg,setSugg]=useState([]);
+const [confirmDel,setConfirmDel]=useState(false);
+const set=(k,v)=>setForm(f=>({…f,[k]:v}));
+const handlePayee=val=>{ set(“payee”,val); if(val.length>0){const m=Object.keys(payeeMap||{}).filter(p=>p.toLowerCase().startsWith(val.toLowerCase())&&p.toLowerCase()!==val.toLowerCase()).slice(0,5);setSugg(m);}else setSugg([]); };
+const pickSugg=p=>{ setForm(f=>({…f,payee:p,category:payeeMap?.[p]||f.category})); setSugg([]); };
+const valid=form.payee&&form.amount&&parseFloat(form.amount)>0;
+return (
+<div style={S.overlay} onClick={onClose}>
+<div style={S.modalW} onClick={e=>e.stopPropagation()}>
+<div style={S.modalHeaderW}><span style={S.modalTitleW}>{tx?“Edit”:“Add”} Transaction</span><button style={S.modalCloseW} onClick={onClose}>✕</button></div>
+<div style={S.typeToggleW}>
+<button style={{…S.typeBtnW,…(form.type===“expense”?S.typeBtnActiveRed:{})}} onClick={()=>set(“type”,“expense”)}>Expense</button>
+<button style={{…S.typeBtnW,…(form.type===“income”?S.typeBtnActiveGreen:{})}} onClick={()=>set(“type”,“income”)}>Income</button>
+</div>
+<input style={S.inputW} type=“date” value={form.date} onChange={e=>set(“date”,e.target.value)}/>
+<div style={{position:“relative”}}>
+<input style={S.inputW} placeholder=“Payee *” value={form.payee} onChange={e=>handlePayee(e.target.value)} autoComplete=“off”/>
+{sugg.length>0&&<div style={S.suggBox}>{sugg.map(s=><div key={s} style={S.suggItem} onClick={()=>pickSugg(s)}><span>{s}</span><span style={S.suggCat}>{payeeMap?.[s]}</span></div>)}</div>}
+</div>
+<select style={S.inputW} value={form.category} onChange={e=>set(“category”,e.target.value)}>{categories.map(c=><option key={c}>{c}</option>)}</select>
+<AmountInput style={S.inputW} placeholder=“Amount *” value={form.amount} onChange={v=>set(“amount”,v)}/>
+<input style={S.inputW} placeholder=“Memo (optional)” value={form.memo} onChange={e=>set(“memo”,e.target.value)}/>
+<button style={{…S.btnPrimary,…(!valid?S.btnDisabled:{})}} disabled={!valid} onClick={()=>onSave(form)}>Save</button>
+{onDelete&&!confirmDel&&<button style={S.btnDanger} onClick={()=>setConfirmDel(true)}>Delete Transaction</button>}
+{onDelete&&confirmDel&&<div style={S.confirmRow}>
+<span style={{fontSize:14,color:”#ef4444”,fontWeight:600}}>Delete this transaction?</span>
+<div style={{display:“flex”,gap:8,marginTop:8}}>
+<button style={{...S.btnDanger,flex:1}} onClick={onDelete}>Yes, Delete</button>
+<button style={{…S.btnSecondary,flex:1}} onClick={()=>setConfirmDel(false)}>Cancel</button>
+</div>
+</div>}
+</div>
+</div>
+);
+}
+
+// ─── Transfer Modal ───────────────────────────────────────────────────────────
+function TransferModal({accounts,onSave,onClose}){
+const [form,setForm]=useState({fromAccount:accounts[0]?.id||””,toAccount:accounts[1]?.id||””,amount:””,date:today(),memo:””});
+const set=(k,v)=>setForm(f=>({…f,[k]:v}));
+const valid=form.fromAccount&&form.toAccount&&form.fromAccount!==form.toAccount&&parseFloat(form.amount)>0;
+return (
+<div style={S.overlay} onClick={onClose}>
+<div style={S.modalW} onClick={e=>e.stopPropagation()}>
+<div style={S.modalHeaderW}><span style={S.modalTitleW}>Transfer</span><button style={S.modalCloseW} onClick={onClose}>✕</button></div>
+<label style={S.inputLabelW}>From</label>
+<select style={S.inputW} value={form.fromAccount} onChange={e=>set(“fromAccount”,e.target.value)}>{accounts.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select>
+<label style={S.inputLabelW}>To</label>
+<select style={S.inputW} value={form.toAccount} onChange={e=>set(“toAccount”,e.target.value)}>{accounts.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select>
+<input style={S.inputW} type=“date” value={form.date} onChange={e=>set(“date”,e.target.value)}/>
+<AmountInput style={S.inputW} placeholder=“Amount *” value={form.amount} onChange={v=>set(“amount”,v)}/>
+<input style={S.inputW} placeholder=“Memo (optional)” value={form.memo} onChange={e=>set(“memo”,e.target.value)}/>
+{form.fromAccount===form.toAccount&&<p style={{color:”#ef4444”,fontSize:13}}>Accounts must be different.</p>}
+<button style={{…S.btnPrimary,…(!valid?S.btnDisabled:{})}} disabled={!valid} onClick={()=>onSave(form)}>Transfer</button>
+</div>
+</div>
+);
+}
+
+// ─── Recurring Modal ──────────────────────────────────────────────────────────
+function RecurringModal({rec,accounts,categories,activeAccountId,onSave,onDelete,onToggle,onClose}){
+const [form,setForm]=useState({type:rec?(rec.amount>=0?“income”:“expense”):“expense”,freq:rec?.freq||“Monthly”,payee:rec?.payee||””,category:rec?.category||“Groceries”,amount:rec?Math.abs(rec.amount).toFixed(2):””,startDate:rec?.startDate||today(),memo:rec?.memo||””,accountId:rec?.accountId||activeAccountId||accounts[0]?.id});
+const set=(k,v)=>setForm(f=>({…f,[k]:v}));
+const valid=form.payee&&parseFloat(form.amount)>0;
+return (
+<div style={S.overlay} onClick={onClose}>
+<div style={S.modalW} onClick={e=>e.stopPropagation()}>
+<div style={S.modalHeaderW}><span style={S.modalTitleW}>{rec?“Edit”:“New”} Recurring</span><button style={S.modalCloseW} onClick={onClose}>✕</button></div>
+<div style={S.typeToggleW}>
+<button style={{…S.typeBtnW,…(form.type===“expense”?S.typeBtnActiveRed:{})}} onClick={()=>set(“type”,“expense”)}>Expense</button>
+<button style={{…S.typeBtnW,…(form.type===“income”?S.typeBtnActiveGreen:{})}} onClick={()=>set(“type”,“income”)}>Income</button>
+</div>
+<div style={S.fieldGroup}>
+<label style={S.fieldLabel}>Account</label>
+<select style={S.fieldSelect} value={form.accountId} onChange={e=>set(“accountId”,e.target.value)}>
+{accounts.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
+</select>
+</div>
+<div style={S.fieldGroup}>
+<label style={S.fieldLabel}>Frequency</label>
+<select style={S.fieldSelect} value={form.freq} onChange={e=>set(“freq”,e.target.value)}>
+{RECUR_FREQS.map(f=><option key={f}>{f}</option>)}
+</select>
+</div>
+<div style={S.fieldGroup}>
+<label style={S.fieldLabel}>Payee *</label>
+<input style={S.fieldInput} placeholder=“e.g. Netflix, Mortgage” value={form.payee} onChange={e=>set(“payee”,e.target.value)}/>
+</div>
+<div style={S.fieldGroup}>
+<label style={S.fieldLabel}>Category</label>
+<select style={S.fieldSelect} value={form.category} onChange={e=>set(“category”,e.target.value)}>
+{categories.map(c=><option key={c}>{c}</option>)}
+</select>
+</div>
+<div style={S.fieldGroup}>
+<label style={S.fieldLabel}>Amount *</label>
+<AmountInput style={S.fieldInput} placeholder=“0.00” value={form.amount} onChange={v=>set(“amount”,v)}/>
+</div>
+<div style={S.fieldGroup}>
+<label style={S.fieldLabel}>Start Date</label>
+<input style={S.fieldInput} type=“date” value={form.startDate} onChange={e=>set(“startDate”,e.target.value)}/>
+</div>
+<div style={S.fieldGroup}>
+<label style={S.fieldLabel}>Memo</label>
+<input style={S.fieldInput} placeholder=“Optional note” value={form.memo} onChange={e=>set(“memo”,e.target.value)}/>
+</div>
+<button style={{…S.btnPrimary,marginTop:4,…(!valid?S.btnDisabled:{})}} disabled={!valid} onClick={()=>onSave(form)}>Save</button>
+{onToggle&&<button style={S.btnSecondary} onClick={onToggle}>{rec?.active?“⏸ Pause”:“▶ Resume”}</button>}
+{onDelete&&<ConfirmDelete label="Delete Recurring" onConfirm={onDelete}/>}
+</div>
+</div>
+);
+}
+
+// ─── Account Modal ────────────────────────────────────────────────────────────
+function AccountModal({account, onSave, onDelete, onClose}){
+const editing = !!account;
+const [form,setForm]=useState({name:account?.name||””,type:account?.type||“Checking”,balance:””});
+const set=(k,v)=>setForm(f=>({…f,[k]:v}));
+return (
+<div style={S.overlay} onClick={onClose}>
+<div style={S.modalW} onClick={e=>e.stopPropagation()}>
+<div style={S.modalHeaderW}><span style={S.modalTitleW}>{editing?“Edit Account”:“New Account”}</span><button style={S.modalCloseW} onClick={onClose}>✕</button></div>
+<input style={S.inputW} placeholder=“Account name *” value={form.name} onChange={e=>set(“name”,e.target.value)}/>
+<select style={S.inputW} value={form.type} onChange={e=>set(“type”,e.target.value)}>{[“Checking”,“Savings”,“Credit”,“Investment”,“Cash”,“IRA”,“Brokerage”].map(t=><option key={t}>{t}</option>)}</select>
+{!editing&&<AmountInput style={S.inputW} placeholder=“Starting balance” value={form.balance} onChange={v=>set(“balance”,v)}/>}
+<button style={{…S.btnPrimary,…(!form.name?S.btnDisabled:{})}} disabled={!form.name} onClick={()=>onSave(form)}>{editing?“Save Changes”:“Add Account”}</button>
+{editing&&onDelete&&<ConfirmDelete label="Delete Account" onConfirm={onDelete}/>}
+</div>
+</div>
+);
+}
+
+// ─── Name Modal ───────────────────────────────────────────────────────────────
+function NameModal({onSave}){
+const [name,setName]=useState(””);
+return (
+<div style={S.overlay}>
+<div style={S.modalW}>
+<div style={S.modalTitleW}>Who are you?</div>
+<p style={{color:”#64748b”,fontSize:13,margin:“6px 0 14px”}}>Helps track who added each transaction.</p>
+<input style={S.inputW} placeholder=“Your name” value={name} onChange={e=>setName(e.target.value)} autoFocus/>
+<button style={{…S.btnPrimary,…(!name.trim()?S.btnDisabled:{})}} disabled={!name.trim()} onClick={()=>onSave(name.trim())}>Continue</button>
+</div>
+</div>
+);
+}
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+const S = {
+// App shell
+app:{ fontFamily:”-apple-system,‘SF Pro Display’,system-ui,sans-serif”, background:”#f8fafc”, minHeight:“100vh”, color:”#1e293b”, maxWidth:480, margin:“0 auto”, position:“relative” },
+loader:{ display:“flex”,alignItems:“center”,justifyContent:“center”,height:“100vh”,background:”#fff” },
+spin:{ width:28,height:28,border:“3px solid #e2e8f0”,borderTop:“3px solid #2563eb”,borderRadius:“50%”,animation:“spin 0.8s linear infinite” },
+screen:{ minHeight:“100vh”,background:”#f8fafc”,paddingBottom:80 },
+screenScroll:{ padding:“0 16px” },
+
+// Top bar
+topBar:{ display:“flex”,justifyContent:“space-between”,alignItems:“center”,padding:“16px 20px 12px”,background:”#fff”,borderBottom:“1px solid #f1f5f9”,position:“sticky”,top:0,zIndex:10 },
+topBarTitle:{ fontSize:20,fontWeight:700,color:”#0f172a” },
+topBarBtn:{ fontSize:24,fontWeight:300,color:”#2563eb”,background:“none”,border:“none”,cursor:“pointer”,lineHeight:1,padding:“0 4px” },
+topBarBtnSm:{ fontSize:13,fontWeight:600,color:”#2563eb”,background:“none”,border:“none”,cursor:“pointer” },
+backBtn:{ fontSize:16,color:”#2563eb”,background:“none”,border:“none”,cursor:“pointer”,fontWeight:500 },
+topBarTitleBtn:{ fontSize:18,fontWeight:700,color:”#0f172a”,background:“none”,border:“none”,cursor:“pointer”,display:“flex”,alignItems:“center”,gap:6 },
+editPencil:{ fontSize:13,color:”#94a3b8” },
+
+// Accounts list
+accountList:{ background:”#fff”,margin:“14px 16px 0”,borderRadius:16,overflow:“hidden”,boxShadow:“0 1px 3px rgba(0,0,0,0.06)” },
+accountRow:{ display:“flex”,alignItems:“center”,padding:“14px 16px”,cursor:“pointer”,gap:14,background:”#fff”,transition:“background 0.1s” },
+accountRowIcon:{ width:44,height:44,borderRadius:12,display:“flex”,alignItems:“center”,justifyContent:“center”,fontSize:20,flexShrink:0 },
+accountRowBody:{ flex:1 },
+accountRowName:{ fontWeight:600,fontSize:16,color:”#0f172a” },
+accountRowType:{ fontSize:13,color:”#94a3b8”,marginTop:1 },
+accountRowRight:{ display:“flex”,alignItems:“center”,gap:6 },
+accountRowBal:{ fontSize:16,fontWeight:700 },
+accountRowChev:{ fontSize:20,color:”#cbd5e1”,fontWeight:300 },
+// Net worth hero
+appTitleHero:{ fontSize:13, fontWeight:700, color:“rgba(255,255,255,0.6)”, letterSpacing:0.5, marginBottom:10, textTransform:“uppercase” },
+netWorthHero:{ margin:“16px 16px 0”, background:”#14532d”, borderRadius:20, padding:“20px 24px 22px”, textAlign:“center” },
+netWorthLabel:{ fontSize:11, fontWeight:700, color:“rgba(255,255,255,0.75)”, textTransform:“uppercase”, letterSpacing:1.5, marginBottom:8 },
+netWorthAmt:{ fontSize:40, fontWeight:800, letterSpacing:”-2px”, lineHeight:1, color:”#fff” },
+
+// Register
+registerHeader:{ display:“flex”,justifyContent:“space-between”,alignItems:“center”,padding:“12px 20px”,background:”#fff”,borderBottom:“1px solid #f1f5f9” },
+registerBalance:{ display:“flex”,flexDirection:“column” },
+registerBalLabel:{ fontSize:11,color:”#94a3b8”,textTransform:“uppercase”,letterSpacing:0.5 },
+registerBalAmt:{ fontSize:24,fontWeight:800,letterSpacing:”-0.5px” },
+transferBtnW:{ background:”#eff6ff”,color:”#2563eb”,border:“none”,borderRadius:10,padding:“8px 14px”,fontWeight:600,fontSize:13,cursor:“pointer” },
+searchWrap:{ padding:“10px 16px”,background:“transparent” },
+searchW:{ width:“100%”,boxSizing:“border-box”,background:”#f1f5f9”,border:“none”,borderRadius:10,padding:“9px 14px”,color:”#1e293b”,fontSize:14,outline:“none” },
+txListW:{ background:”#fff”,margin:“12px 16px”,borderRadius:16,overflow:“hidden”,boxShadow:“0 1px 3px rgba(0,0,0,0.06)” },
+txRowW:{ display:“flex”,alignItems:“center”,padding:“13px 16px”,cursor:“pointer”,gap:12,background:”#fff” },
+txClearedDot:{ width:10,height:10,borderRadius:“50%”,flexShrink:0,cursor:“pointer”,transition:“background 0.2s” },
+txRowBody:{ flex:1,minWidth:0 },
+txRowTop:{ display:“flex”,justifyContent:“space-between”,alignItems:“baseline”,gap:8 },
+txRowPayee:{ fontWeight:600,fontSize:15,color:”#0f172a”,overflow:“hidden”,textOverflow:“ellipsis”,whiteSpace:“nowrap” },
+txRowAmt:{ fontWeight:700,fontSize:15,flexShrink:0 },
+txRowBot:{ display:“flex”,justifyContent:“space-between”,marginTop:2 },
+txRowCat:{ fontSize:12,color:”#64748b” },
+txRowDate:{ fontSize:12,color:”#94a3b8” },
+txRowMemo:{ fontSize:12,color:”#94a3b8”,marginTop:2,fontStyle:“italic” },
+txRowTag:{ fontSize:11,color:”#94a3b8”,marginTop:2 },
+txChev:{ fontSize:18,color:”#cbd5e1”,fontWeight:300,flexShrink:0 },
+emptyW:{ textAlign:“center”,color:”#94a3b8”,padding:“40px 20px”,fontSize:15,lineHeight:1.7 },
+
+// Bottom nav
+bottomNav:{ position:“fixed”,bottom:0,left:“50%”,transform:“translateX(-50%)”,width:“100%”,maxWidth:480,background:”#fff”,borderTop:“1px solid #e2e8f0”,display:“flex”,alignItems:“center”,zIndex:20,paddingBottom:“env(safe-area-inset-bottom,0px)” },
+navBtn:{ flex:1,display:“flex”,flexDirection:“column”,alignItems:“center”,padding:“10px 0 8px”,background:“none”,border:“none”,cursor:“pointer”,gap:4 },
+navBtnActive:{},
+navIcon:{ fontSize:22 },
+navLabel:{ fontSize:10,fontWeight:600,color:”#94a3b8”,letterSpacing:0.2 },
+navPlusBtn:{ width:52,height:52,borderRadius:“50%”,background:”#2563eb”,border:“none”,cursor:“pointer”,display:“flex”,alignItems:“center”,justifyContent:“center”,boxShadow:“0 4px 14px rgba(37,99,235,0.4)”,flexShrink:0,marginBottom:8 },
+
+// Reports
+reportDateRow:{ display:“flex”,alignItems:“center”,gap:8,padding:“10px 16px”,background:”#fff”,borderBottom:“1px solid #f1f5f9” },
+dateInputW:{ flex:1,background:”#f1f5f9”,border:“none”,borderRadius:8,padding:“7px 10px”,color:”#1e293b”,fontSize:13,outline:“none” },
+summaryStrip:{ display:“flex”,background:”#fff”,margin:“12px 16px”,borderRadius:16,padding:“14px 0”,boxShadow:“0 1px 3px rgba(0,0,0,0.06)” },
+summaryItem:{ flex:1,textAlign:“center” },
+summaryDivider:{ width:1,background:”#f1f5f9” },
+summaryLbl:{ fontSize:11,color:”#94a3b8”,marginTop:2,textTransform:“uppercase”,letterSpacing:0.5 },
+reportTabRow:{ display:“flex”,gap:0,padding:“0 16px 8px”,overflowX:“auto”,scrollbarWidth:“none” },
+reportTabW:{ padding:“6px 14px”,border:“none”,background:“transparent”,color:”#94a3b8”,fontWeight:600,fontSize:13,cursor:“pointer”,borderRadius:20,whiteSpace:“nowrap” },
+reportTabActiveW:{ background:”#eff6ff”,color:”#2563eb” },
+reportRow:{ display:“flex”,alignItems:“center”,gap:8,marginBottom:10 },
+reportRowLabel:{ width:100,fontSize:13,color:”#475569”,flexShrink:0,overflow:“hidden”,textOverflow:“ellipsis”,whiteSpace:“nowrap” },
+reportBarWrap:{ flex:1,height:8,background:”#f1f5f9”,borderRadius:4,overflow:“hidden” },
+reportBar:{ height:“100%”,background:”#2563eb”,borderRadius:4,transition:“width 0.4s” },
+reportRowAmt:{ width:70,textAlign:“right”,fontSize:13,fontWeight:600,flexShrink:0 },
+payeeRowW:{ background:”#fff”,borderRadius:12,padding:“12px 14px”,marginBottom:6,boxShadow:“0 1px 2px rgba(0,0,0,0.04)” },
+payeeRowTop:{ display:“flex”,justifyContent:“space-between” },
+payeeRowBot:{ display:“flex”,justifyContent:“space-between”,marginTop:4 },
+acctReportRowW:{ background:”#fff”,borderRadius:12,padding:“14px”,marginBottom:8,boxShadow:“0 1px 2px rgba(0,0,0,0.04)” },
+acctBarLbl:{ width:60,fontSize:12,color:”#94a3b8”,flexShrink:0 },
+trendLegend:{ fontSize:12,color:”#94a3b8”,marginBottom:8 },
+trendChart:{ display:“flex”,gap:4,height:140,alignItems:“flex-end”,background:”#fff”,borderRadius:16,padding:“16px 8px 8px”,boxShadow:“0 1px 3px rgba(0,0,0,0.06)” },
+trendCol:{ flex:1,display:“flex”,flexDirection:“column”,alignItems:“center”,gap:4 },
+trendBars:{ width:“100%”,display:“flex”,gap:2,height:100,alignItems:“flex-end” },
+trendBar:{ flex:1,borderRadius:“3px 3px 0 0”,minHeight:2 },
+trendLabel:{ fontSize:9,color:”#94a3b8” },
+
+// Settings
+settingsSection:{ marginBottom:24 },
+settingsSectionTitle:{ fontSize:13,fontWeight:700,color:”#94a3b8”,textTransform:“uppercase”,letterSpacing:0.5,marginBottom:10 },
+settingsDivider:{ height:1,background:”#f1f5f9”,margin:“8px 0 20px” },
+settingsBtn:{ width:“100%”,background:”#2563eb”,color:”#fff”,border:“none”,borderRadius:12,padding:“13px”,fontWeight:600,fontSize:15,cursor:“pointer”,marginBottom:8 },
+settingsBtnOutline:{ display:“block”,width:“100%”,boxSizing:“border-box”,textAlign:“center”,background:”#fff”,color:”#2563eb”,border:“1.5px solid #e2e8f0”,borderRadius:12,padding:“13px”,fontWeight:600,fontSize:15,cursor:“pointer”,marginBottom:8 },
+dataStatsW:{ display:“flex”,gap:10,marginTop:12 },
+dataStatW:{ flex:1,background:”#fff”,borderRadius:12,padding:“12px”,textAlign:“center”,boxShadow:“0 1px 2px rgba(0,0,0,0.04)” },
+dataStatNum:{ fontWeight:700,fontSize:18,color:”#0f172a” },
+dataStatLbl:{ fontSize:11,color:”#94a3b8”,marginTop:2,textTransform:“uppercase”,letterSpacing:0.3 },
+catChipW:{ display:“inline-flex”,alignItems:“center”,gap:6,background:”#f1f5f9”,borderRadius:99,padding:“6px 12px”,fontSize:13,color:”#334155” },
+catChipDelW:{ background:“none”,border:“none”,color:”#94a3b8”,cursor:“pointer”,fontSize:12,lineHeight:1 },
+budgetRowW:{ display:“flex”,alignItems:“center”,justifyContent:“space-between”,padding:“10px 12px”,borderRadius:10,background:”#f8fafc”,marginBottom:6 },
+budgetLabelW:{ fontSize:15,color:”#334155” },
+budgetInputW:{ width:90,background:”#f1f5f9”,border:“none”,borderRadius:8,padding:“7px 10px”,color:”#1e293b”,fontSize:14,textAlign:“right”,outline:“none” },
+
+// Modals
+overlay:{ position:“fixed”,inset:0,background:“rgba(0,0,0,0.4)”,zIndex:100,display:“flex”,alignItems:“flex-end”,justifyContent:“center” },
+modalW:{ background:”#fff”,borderRadius:“20px 20px 0 0”,padding:“24px 20px”,width:“100%”,maxWidth:480,maxHeight:“92vh”,overflowY:“auto”,display:“flex”,flexDirection:“column”,gap:10 },
+modalHeaderW:{ display:“flex”,justifyContent:“space-between”,alignItems:“center”,marginBottom:4 },
+modalTitleW:{ fontWeight:700,fontSize:19,color:”#0f172a” },
+modalCloseW:{ background:”#f1f5f9”,border:“none”,borderRadius:99,width:30,height:30,fontSize:14,cursor:“pointer”,color:”#64748b”,display:“flex”,alignItems:“center”,justifyContent:“center” },
+inputLabelW:{ fontSize:12,fontWeight:700,color:”#64748b”,textTransform:“uppercase”,letterSpacing:0.5,marginBottom:-2,marginTop:4 },
+fieldGroup:{ display:“flex”,flexDirection:“column”,gap:5 },
+fieldLabel:{ fontSize:13,fontWeight:600,color:”#475569” },
+fieldInput:{ background:”#fff”,border:“1.5px solid #e2e8f0”,borderRadius:12,padding:“13px 14px”,color:”#0f172a”,fontSize:16,outline:“none”,width:“100%”,boxSizing:“border-box” },
+fieldSelect:{ background:”#fff”,border:“1.5px solid #e2e8f0”,borderRadius:12,padding:“13px 14px”,color:”#0f172a”,fontSize:16,outline:“none”,width:“100%”,boxSizing:“border-box”,appearance:“none”,WebkitAppearance:“none” },
+inputW:{ background:”#fff”,border:“1.5px solid #e2e8f0”,borderRadius:12,padding:“12px 14px”,color:”#0f172a”,fontSize:15,outline:“none”,width:“100%”,boxSizing:“border-box” },
+selectW:{ background:”#fff”,border:“1.5px solid #e2e8f0”,borderRadius:12,padding:“10px 14px”,color:”#0f172a”,fontSize:14,outline:“none”,width:“100%”,boxSizing:“border-box” },
+typeToggleW:{ display:“flex”,gap:6,background:”#f1f5f9”,borderRadius:12,padding:4 },
+typeBtnW:{ flex:1,padding:“9px”,border:“none”,background:“transparent”,color:”#64748b”,fontWeight:600,borderRadius:10,cursor:“pointer”,fontSize:14 },
+typeBtnActiveRed:{ background:”#fef2f2”,color:”#ef4444” },
+typeBtnActiveGreen:{ background:”#f0fdf4”,color:”#16a34a” },
+btnPrimary:{ background:”#2563eb”,color:”#fff”,border:“none”,borderRadius:12,padding:“13px”,fontWeight:700,fontSize:15,cursor:“pointer”,width:“100%” },
+btnSecondary:{ background:”#eff6ff”,color:”#2563eb”,border:“none”,borderRadius:12,padding:“12px”,fontWeight:600,fontSize:14,cursor:“pointer”,width:“100%” },
+btnDanger:{ background:”#fff”,color:”#ef4444”,border:“1.5px solid #fecaca”,borderRadius:12,padding:“12px”,fontWeight:600,fontSize:14,cursor:“pointer”,width:“100%” },
+btnDisabled:{ opacity:0.4,cursor:“not-allowed” },
+confirmRow:{ background:”#fff5f5”,border:“1px solid #fecaca”,borderRadius:12,padding:“12px” },
+// Grab handle
+reorderBtns:{ display:“flex”,flexDirection:“column”,alignItems:“center”,justifyContent:“center”,gap:0,marginRight:2,flexShrink:0 },
+reorderBtn:{ background:“none”,border:“none”,cursor:“pointer”,padding:“2px 4px”,display:“flex”,alignItems:“center”,justifyContent:“center”,borderRadius:6,minWidth:28,minHeight:28 },
+// Report filters
+filterToggleBtn:{ position:“relative”,background:”#f1f5f9”,border:“none”,borderRadius:8,padding:“7px 10px”,color:”#64748b”,cursor:“pointer”,display:“flex”,alignItems:“center”,gap:4,flexShrink:0 },
+filterDot:{ position:“absolute”,top:4,right:4,width:7,height:7,borderRadius:“50%”,background:”#2563eb”,display:“block” },
+filterPanel:{ background:”#fff”,margin:“0 8px 4px”,padding:“12px 16px”,borderRadius:16,border:“1px solid #f1f5f9” },
+filterSection:{ marginBottom:12 },
+filterLabel:{ fontSize:11,fontWeight:700,color:”#94a3b8”,textTransform:“uppercase”,letterSpacing:0.5,marginBottom:8,display:“flex”,alignItems:“center”,gap:6 },
+filterChips:{ display:“flex”,flexWrap:“wrap”,gap:6 },
+filterChip:{ background:”#f8fafc”,border:“1.5px solid #e2e8f0”,borderRadius:99,padding:“4px 12px”,fontSize:12,fontWeight:600,cursor:“pointer”,color:”#475569” },
+filterChipAll:{ background:“none”,border:“none”,color:”#2563eb”,fontSize:11,fontWeight:700,cursor:“pointer”,padding:“2px 4px” },
+// Drill-down report
+drillRow:{ display:“flex”,alignItems:“center”,padding:“12px 14px”,cursor:“pointer”,border:“1px solid #f1f5f9”,transition:“background 0.15s,border-radius 0.15s” },
+drillLeft:{ flex:1,minWidth:0,paddingRight:10 },
+drillLabel:{ fontWeight:600,fontSize:14,color:”#0f172a”,overflow:“hidden”,textOverflow:“ellipsis”,whiteSpace:“nowrap” },
+drillSub:{ fontSize:11,color:”#94a3b8”,marginTop:1 },
+drillRight:{ display:“flex”,flexDirection:“column”,alignItems:“flex-end”,gap:2,flexShrink:0 },
+drillAmt:{ fontWeight:700,fontSize:14,color:”#ef4444” },
+drillChev:{ fontSize:18,color:”#cbd5e1”,transition:“transform 0.2s”,lineHeight:1 },
+drillTxList:{ background:”#f8fafc”,borderRadius:“0 0 12px 12px”,border:“1px solid #eff6ff”,borderTop:“none”,overflow:“hidden” },
+drillTxRow:{ display:“flex”,alignItems:“center”,padding:“10px 16px”,background:”#f8fafc” },
+drillTxTotal:{ display:“flex”,justifyContent:“space-between”,padding:“10px 16px”,background:”#eff6ff”,borderTop:“1px solid #e0eaff” },
+suggBox:{ position:“absolute”,top:“100%”,left:0,right:0,background:”#fff”,border:“1.5px solid #e2e8f0”,borderRadius:12,zIndex:50,overflow:“hidden”,marginTop:2,boxShadow:“0 8px 24px rgba(0,0,0,0.1)” },
+suggItem:{ display:“flex”,justifyContent:“space-between”,alignItems:“center”,padding:“11px 14px”,cursor:“pointer”,borderBottom:“1px solid #f8fafc” },
+suggCat:{ fontSize:12,color:”#94a3b8”,background:”#f1f5f9”,padding:“2px 8px”,borderRadius:99 },
+backupBanner:{ margin:“12px 16px 0”,background:”#fffbeb”,border:“1px solid #fde68a”,borderRadius:16,padding:“14px 16px” },
+backupBannerText:{ fontSize:14,color:”#92400e”,fontWeight:600,lineHeight:1.4 },
+backupBannerBtn:{ background:”#d97706”,color:”#fff”,border:“none”,borderRadius:10,padding:“8px 16px”,fontWeight:700,fontSize:13,cursor:“pointer” },
+backupBannerDismiss:{ background:“transparent”,color:”#92400e”,border:“1px solid #fde68a”,borderRadius:10,padding:“8px 16px”,fontWeight:600,fontSize:13,cursor:“pointer” },
+toast:{ position:“fixed”,bottom:88,left:“50%”,transform:“translateX(-50%)”,color:”#fff”,padding:“10px 22px”,borderRadius:99,fontWeight:600,fontSize:14,zIndex:200,whiteSpace:“nowrap”,boxShadow:“0 4px 20px rgba(0,0,0,0.2)” },
+};
+
+```
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(App));
+```
+
+  </script>
+</body>
+</html>
